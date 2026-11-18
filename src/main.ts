@@ -1,41 +1,25 @@
 import './styles.css';
-import { Book } from './task1-types';
+import { AsyncState, Book } from './task1-types';
 import { applyFilters, filterByAuthor, filterByMinYear } from './task3-filters';
 import { createBookFromForm } from "./task4-integration";
 import { filterByTitle, sortBooks } from './task5-utils';
 import { BookCatalog } from './task6-classes';
 import { Wishlist } from './task7-wishlist';
+import { fetchBooks, saveBooks } from './mock-api';
 
 // ============================================================
-// ИСХОДНОЕ СОСТОЯНИЕ
+// СОСТОЯНИЕ
 // ============================================================
-let catalog = new BookCatalog('main', [
-  { id: '1', title: 'TypeScript Guide', authors: ['John Doe'], year: 2024 },
-  { id: '2', title: 'JavaScript Basics', authors: ['Jane Smith'], year: 2022 },
-]);
+let state: AsyncState<Book[]> = { status: 'loading' };
+
+// Временное сообщение об ошибке сохранения (список при этом не пропадает)
+let errorMessage = '';
 
 let wishlist = new Wishlist();
-
-// Загрузка из localStorage (в практике 4-1 переедет в mock-api.ts)
-const savedCatalog = localStorage.getItem('catalog');
-if (savedCatalog) {
-  const parsed = JSON.parse(savedCatalog);
-  catalog = new BookCatalog(parsed.id, parsed.books);
-}
 
 const savedWishlist = localStorage.getItem('wishlist');
 if (savedWishlist) {
   wishlist = new Wishlist(JSON.parse(savedWishlist));
-}
-
-// ============================================================
-// СОХРАНЕНИЕ (в практике 4-1 переедет в mock-api.ts)
-// ============================================================
-function saveCatalog() {
-  localStorage.setItem('catalog', JSON.stringify({
-    id: catalog.id,
-    books: catalog.getBooks()
-  }));
 }
 
 function saveWishlist() {
@@ -51,9 +35,29 @@ const form = document.querySelector('#bookForm') as HTMLFormElement;
 const filterBtn = document.querySelector('#applyFilters') as HTMLButtonElement;
 const authorInput = document.querySelector('#filterAuthor') as HTMLInputElement;
 const yearInput = document.querySelector('#filterYear') as HTMLInputElement;
-const errorMessage = document.querySelector('#errorMessage') as HTMLDivElement;
+const errorBox = document.querySelector('#errorMessage') as HTMLDivElement;
 const searchInput = document.querySelector('#searchInput') as HTMLInputElement;
 const sortBySelect = document.querySelector('#sortBy') as HTMLSelectElement;
+
+// ============================================================
+// СОХРАНЕНИЕ (асинхронно, с обработкой ошибок)
+// ============================================================
+async function updateBooks(newBooks: Book[]) {
+  try {
+    await saveBooks(newBooks);
+    state = { status: 'success', data: newBooks };
+    render();
+    return true;
+  } catch (error) {
+    errorMessage = error instanceof Error ? error.message : 'Не удалось сохранить';
+    render();
+    setTimeout(() => {
+      errorMessage = '';
+      render();
+    }, 3000);
+    return false;
+  }
+}
 
 // ============================================================
 // СОЗДАНИЕ КАРТОЧКИ
@@ -75,20 +79,21 @@ function createBookCard(book: Book): HTMLDivElement {
   // Кнопка «Удалить»
   const deleteBtn = document.createElement('button');
   deleteBtn.textContent = 'Удалить';
-  deleteBtn.addEventListener('click', () => {
+  deleteBtn.addEventListener('click', async () => {
+    if (state.status !== 'success') return;
+    const catalog = new BookCatalog('main', state.data);
     catalog.removeBook(book.id);
-    saveCatalog();
-    updateView();
+    await updateBooks(catalog.getBooks());
   });
   card.append(deleteBtn);
 
-  // Кнопка «Избранное» 
+  // Кнопка «Избранное»
   const favBtn = document.createElement('button');
   favBtn.textContent = wishlist.has(book.id) ? '❤️ В избранном' : '🤍 В избранное';
   favBtn.addEventListener('click', () => {
     wishlist.toggle(book.id);
     saveWishlist();
-    updateView();
+    render();
   });
   card.append(favBtn);
 
@@ -111,7 +116,7 @@ function renderBooks(books: Book[]) {
   });
 }
 
-function renderWishlist() {
+function renderWishlist(catalog: BookCatalog) {
   wishlistContainer.innerHTML = '';
   const favBooks = wishlist.getFavorites(catalog);
 
@@ -125,47 +130,113 @@ function renderWishlist() {
   });
 }
 
-// Единая функция обновления вида
-function updateView() {
+// Отрисовка списка книг с учётом фильтров и сортировки
+function renderSuccess(books: Book[]) {
+  const catalog = new BookCatalog('main', books);
+
   const filters: ((book: Book) => boolean)[] = [];
   if (authorInput.value.trim()) filters.push(filterByAuthor(authorInput.value.trim()));
   if (yearInput.value) filters.push(filterByMinYear(parseInt(yearInput.value, 10)));
   if (searchInput.value.trim()) filters.push(filterByTitle(searchInput.value.trim()));
 
-  const allBooks = catalog.getBooks();
-  const filtered = applyFilters(allBooks, filters);
+  const filtered = applyFilters(catalog.getBooks(), filters);
   const sorted = sortBooks(filtered, sortBySelect.value as 'year' | 'rating');
 
   renderBooks(sorted);
-  renderWishlist();
+  renderWishlist(catalog);
 }
 
-// Первичная отрисовка
-updateView();
+function renderError(message: string) {
+  bookList.innerHTML = '';
+  wishlistContainer.innerHTML = '';
+
+  const box = document.createElement('div');
+  box.style.color = 'white';
+  box.style.background = '#d33';
+  box.style.padding = '16px';
+  box.style.borderRadius = '8px';
+  box.textContent = message;
+
+  const retryBtn = document.createElement('button');
+  retryBtn.textContent = 'Повторить попытку';
+  retryBtn.style.marginLeft = '12px';
+  retryBtn.addEventListener('click', () => {
+    initApp();
+  });
+  box.append(retryBtn);
+
+  bookList.append(box);
+}
+
+// Единая функция отрисовки — вызывается после каждого изменения state
+function render() {
+  errorBox.textContent = errorMessage;
+  errorBox.style.color = 'red';
+
+  switch (state.status) {
+    case 'idle':
+      bookList.textContent = 'Нажмите, чтобы загрузить данные';
+      wishlistContainer.innerHTML = '';
+      break;
+    case 'loading':
+      bookList.textContent = 'Загрузка данных...';
+      wishlistContainer.innerHTML = '';
+      break;
+    case 'success':
+      renderSuccess(state.data);
+      break;
+    case 'error':
+      renderError(state.message);
+      break;
+  }
+}
+
+// ============================================================
+// ИНИЦИАЛИЗАЦИЯ
+// ============================================================
+async function initApp() {
+  state = { status: 'loading' };
+  render();
+
+  try {
+    const books = await fetchBooks();
+    state = { status: 'success', data: books };
+  } catch (error) {
+    state = { status: 'error', message: error instanceof Error ? error.message : 'Неизвестная ошибка' };
+  }
+
+  render();
+}
+
+initApp();
 
 // ============================================================
 // ОБРАБОТЧИК ФОРМЫ
 // ============================================================
-form.addEventListener('submit', (e) => {
+form.addEventListener('submit', async (e) => {
   e.preventDefault();
-  errorMessage.textContent = '';
+  if (state.status !== 'success') return;
+
+  let newBook: Book;
   try {
-    const formData = new FormData(form);
-    const newBook = createBookFromForm(formData);
-    catalog.addBook(newBook);
-    saveCatalog();
-    form.reset();
-    updateView();
+    newBook = createBookFromForm(new FormData(form));
   } catch (error) {
-    if (error instanceof Error) {
-      errorMessage.textContent = error.message;
-    }
+    errorMessage = error instanceof Error ? error.message : 'Ошибка в форме';
+    render();
+    return;
   }
+
+  errorMessage = '';
+  const catalog = new BookCatalog('main', state.data);
+  catalog.addBook(newBook);
+
+  const saved = await updateBooks(catalog.getBooks());
+  if (saved) form.reset();
 });
 
 // ============================================================
 // ФИЛЬТРЫ И СОРТИРОВКА
 // ============================================================
-filterBtn.addEventListener('click', updateView);
-searchInput.addEventListener('input', updateView);
-sortBySelect.addEventListener('change', updateView);
+filterBtn.addEventListener('click', render);
+searchInput.addEventListener('input', render);
+sortBySelect.addEventListener('change', render);
